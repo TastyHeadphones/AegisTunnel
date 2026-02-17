@@ -10,7 +10,8 @@ public enum AppBootstrap {
         let secretStore = KeychainSecretStore(service: "\(appIdentifier).secrets")
 
         let transportController = TransportController(
-            transportFactory: StubTransportFactory(),
+            transportFactory: DefaultTransportFactory(),
+            secretStore: secretStore,
             logger: logger
         )
 

@@ -1,5 +1,6 @@
 import Foundation
 
+/// High level lifecycle state for a transport session.
 public enum TransportStatus: String, Codable, Equatable, Sendable {
     case disconnected
     case connecting

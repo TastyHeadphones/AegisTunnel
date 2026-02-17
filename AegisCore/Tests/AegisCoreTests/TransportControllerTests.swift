@@ -1,73 +1,193 @@
+import Foundation
 import XCTest
 @testable import AegisCore
 
-final class TransportControllerTests: XCTestCase {
-    func testConnectDisconnectTransitionsArePublished() async {
-        let controller = TransportController(
-            transportFactory: StubTransportFactory(),
-            logger: NoopLogger(),
-            monitorInterval: .milliseconds(80)
+private final class DeterministicTransport: Transport, @unchecked Sendable {
+    private var _status: TransportStatus = .disconnected
+    private var _metrics: TransportMetrics = .zero
+    private let _capabilities: TransportCapabilities
+
+    init(capabilities: TransportCapabilities) {
+        self._capabilities = capabilities
+    }
+
+    var status: TransportStatus {
+        return _status
+    }
+
+    var metrics: TransportMetrics {
+        return _metrics
+    }
+
+    var capabilities: TransportCapabilities { _capabilities }
+
+    var diagnostics: TransportDiagnostics { .empty }
+
+    func connect() async throws {
+        _status = .connected
+        _metrics = _metrics.withConnectedSince(Date())
+    }
+
+    func disconnect() async {
+        _status = .disconnected
+        _metrics = _metrics.disconnected()
+    }
+
+    func send(_ payload: Data) async throws {
+        _metrics = _metrics.incremented(
+            bytesReceived: 0,
+            bytesSent: UInt64(payload.count),
+            packetsReceived: 0,
+            packetsSent: 1,
+            latencyMilliseconds: _metrics.latencyMilliseconds
+        )
+    }
+
+    func receive() async throws -> Data {
+        _metrics = _metrics.incremented(
+            bytesReceived: 3,
+            bytesSent: 0,
+            packetsReceived: 1,
+            packetsSent: 0,
+            latencyMilliseconds: _metrics.latencyMilliseconds
         )
 
-        let profile = Profile(
-            name: "Demo",
-            serverHost: "example.com",
-            serverPort: 443,
-            transportType: .demo,
-            notes: "",
-            secretID: UUID()
-        )
+        return Data("ack".utf8)
+    }
+}
 
-        await controller.setActiveProfile(profile)
-
-        let stream = await controller.snapshots()
-        let collector = Task { () -> [TransportStatus] in
-            var statuses: [TransportStatus] = []
-            for await snapshot in stream.prefix(3) {
-                statuses.append(snapshot.status)
-            }
-            return statuses
+private struct DeterministicTransportFactory: TransportFactory {
+    func makeTransport(for profile: Profile, secretStore: any SecretStore, logger: any Logger) -> any Transport {
+        switch profile.transportType {
+        case .masqueHTTP3:
+            return DeterministicTransport(
+                capabilities: TransportCapabilities(
+                    supportsStreams: true,
+                    supportsDatagrams: true,
+                    supportsUDPAssociate: false,
+                    supportsNativeQUICStreams: true
+                )
+            )
+        case .httpConnectTLS:
+            return DeterministicTransport(
+                capabilities: TransportCapabilities(
+                    supportsStreams: true,
+                    supportsDatagrams: false,
+                    supportsUDPAssociate: false,
+                    supportsNativeQUICStreams: false
+                )
+            )
+        case .socks5TLS:
+            return DeterministicTransport(
+                capabilities: TransportCapabilities(
+                    supportsStreams: true,
+                    supportsDatagrams: false,
+                    supportsUDPAssociate: true,
+                    supportsNativeQUICStreams: false
+                )
+            )
+        case .mtlsTCP:
+            return DeterministicTransport(
+                capabilities: TransportCapabilities(
+                    supportsStreams: true,
+                    supportsDatagrams: false,
+                    supportsUDPAssociate: false,
+                    supportsNativeQUICStreams: false
+                )
+            )
+        case .quic:
+            return DeterministicTransport(
+                capabilities: TransportCapabilities(
+                    supportsStreams: true,
+                    supportsDatagrams: true,
+                    supportsUDPAssociate: false,
+                    supportsNativeQUICStreams: true
+                )
+            )
         }
+    }
+}
 
-        await controller.connect()
-        await controller.disconnect()
+final class TransportControllerTests: XCTestCase {
+    func testStateTransitionsForAllTransportTypes() async throws {
+        let controller = TransportController(
+            transportFactory: DeterministicTransportFactory(),
+            secretStore: NoopSecretStore(),
+            logger: NoopLogger(),
+            monitorInterval: .milliseconds(30)
+        )
 
-        let statuses = await collector.value
+        for transportType in TransportType.allCases {
+            let profile = makeProfile(transportType: transportType)
+            await controller.setActiveProfile(profile)
+            try await controller.connect()
 
-        XCTAssertTrue(statuses.contains(.connected))
-        XCTAssertTrue(statuses.contains(.disconnected))
+            var snapshot = await controller.currentSnapshot()
+            XCTAssertEqual(snapshot.status, .connected)
+            XCTAssertEqual(snapshot.transportType, transportType)
 
-        let finalSnapshot = await controller.currentSnapshot()
-        XCTAssertEqual(finalSnapshot.status, .disconnected)
+            try await controller.send(Data("hello".utf8))
+            _ = try await controller.receive()
+
+            snapshot = await controller.currentSnapshot()
+            XCTAssertGreaterThanOrEqual(snapshot.metrics.bytesSent, 5)
+            XCTAssertGreaterThanOrEqual(snapshot.metrics.bytesReceived, 3)
+
+            await controller.disconnect()
+            snapshot = await controller.currentSnapshot()
+            XCTAssertEqual(snapshot.status, .disconnected)
+        }
 
         await controller.shutdown()
     }
 
-    func testClearingActiveProfileResetsSnapshot() async {
-        let controller = TransportController(
-            transportFactory: StubTransportFactory(),
-            logger: NoopLogger(),
-            monitorInterval: .milliseconds(50)
+    private func makeProfile(transportType: TransportType) -> Profile {
+        let endpoint = UpstreamEndpoint(host: "127.0.0.1", port: 443, tlsMode: .none)
+
+        let options: TransportOptions
+        switch transportType {
+        case .masqueHTTP3:
+            options = .masque(
+                MASQUETransportOptions(
+                    proxyEndpoint: endpoint,
+                    targetHost: "example.com",
+                    targetPort: 443
+                )
+            )
+        case .httpConnectTLS:
+            options = .httpConnectTLS(
+                HTTPConnectTLSTransportOptions(
+                    proxyEndpoint: endpoint,
+                    targetHost: "example.com",
+                    targetPort: 443
+                )
+            )
+        case .socks5TLS:
+            options = .socks5TLS(
+                Socks5TLSTransportOptions(
+                    proxyEndpoint: endpoint,
+                    destinationHost: "example.com",
+                    destinationPort: 443
+                )
+            )
+        case .mtlsTCP:
+            options = .mtlsTCP(
+                MtlsTcpTunnelTransportOptions(
+                    endpoint: endpoint
+                )
+            )
+        case .quic:
+            options = .quic(
+                QuicTunnelTransportOptions(endpoint: endpoint)
+            )
+        }
+
+        return Profile(
+            name: transportType.displayName,
+            serverHost: endpoint.host,
+            serverPort: endpoint.port,
+            transportType: transportType,
+            transportOptions: options
         )
-
-        let profile = Profile(
-            name: "QUIC",
-            serverHost: "example.org",
-            serverPort: 443,
-            transportType: .quicTunnelStub,
-            secretID: UUID()
-        )
-
-        await controller.setActiveProfile(profile)
-        await controller.connect()
-        await controller.setActiveProfile(nil)
-
-        let snapshot = await controller.currentSnapshot()
-
-        XCTAssertNil(snapshot.activeProfileID)
-        XCTAssertEqual(snapshot.status, .disconnected)
-        XCTAssertNil(snapshot.transportType)
-
-        await controller.shutdown()
     }
 }

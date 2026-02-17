@@ -16,6 +16,7 @@ public struct AegisRootView: View {
         } detail: {
             VStack(spacing: 16) {
                 ConnectionDashboardView(viewModel: viewModel)
+                DiagnosticsView(viewModel: viewModel)
                 LiveLogView(logStore: viewModel.logStore)
             }
             .padding()

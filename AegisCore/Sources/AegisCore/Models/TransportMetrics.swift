@@ -1,5 +1,6 @@
 import Foundation
 
+/// Connection metrics surfaced by transports.
 public struct TransportMetrics: Codable, Equatable, Sendable {
     public let bytesReceived: UInt64
     public let bytesSent: UInt64
@@ -33,6 +34,25 @@ public struct TransportMetrics: Codable, Equatable, Sendable {
         connectedSince: nil
     )
 
+    public var duration: TimeInterval? {
+        guard let connectedSince else {
+            return nil
+        }
+
+        return Date().timeIntervalSince(connectedSince)
+    }
+
+    public func withConnectedSince(_ date: Date?) -> TransportMetrics {
+        TransportMetrics(
+            bytesReceived: bytesReceived,
+            bytesSent: bytesSent,
+            packetsReceived: packetsReceived,
+            packetsSent: packetsSent,
+            latencyMilliseconds: latencyMilliseconds,
+            connectedSince: date
+        )
+    }
+
     public func incremented(
         bytesReceived: UInt64,
         bytesSent: UInt64,
@@ -51,13 +71,6 @@ public struct TransportMetrics: Codable, Equatable, Sendable {
     }
 
     public func disconnected() -> TransportMetrics {
-        TransportMetrics(
-            bytesReceived: bytesReceived,
-            bytesSent: bytesSent,
-            packetsReceived: packetsReceived,
-            packetsSent: packetsSent,
-            latencyMilliseconds: latencyMilliseconds,
-            connectedSince: nil
-        )
+        withConnectedSince(nil)
     }
 }

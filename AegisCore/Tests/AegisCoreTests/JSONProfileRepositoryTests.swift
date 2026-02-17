@@ -17,11 +17,21 @@ final class JSONProfileRepositoryTests: XCTestCase {
         let profile = Profile(
             id: UUID(),
             name: "Primary",
-            serverHost: "host.local",
-            serverPort: 8443,
-            transportType: .tlsTunnelStub,
-            notes: "Initial",
-            secretID: UUID()
+            serverHost: "proxy.local",
+            serverPort: 443,
+            transportType: .httpConnectTLS,
+            transportOptions: .httpConnectTLS(
+                HTTPConnectTLSTransportOptions(
+                    proxyEndpoint: UpstreamEndpoint(
+                        host: "proxy.local",
+                        port: 443,
+                        tlsMode: .tls
+                    ),
+                    targetHost: "upstream.local",
+                    targetPort: 443
+                )
+            ),
+            notes: "Initial"
         )
 
         try await repository.saveProfile(profile)
@@ -29,24 +39,29 @@ final class JSONProfileRepositoryTests: XCTestCase {
 
         XCTAssertEqual(loaded.count, 1)
         XCTAssertEqual(loaded.first?.id, profile.id)
-        XCTAssertEqual(loaded.first?.transportType, .tlsTunnelStub)
+        XCTAssertEqual(loaded.first?.transportType, .httpConnectTLS)
 
-        let updatedProfile = Profile(
+        let updated = Profile(
             id: profile.id,
             name: "Primary Updated",
-            serverHost: "host.local",
-            serverPort: 9443,
-            transportType: .quicTunnelStub,
-            notes: "Updated",
-            secretID: profile.secretID
+            serverHost: "proxy.local",
+            serverPort: 443,
+            transportType: .quic,
+            transportOptions: .quic(
+                QuicTunnelTransportOptions(
+                    endpoint: UpstreamEndpoint(host: "proxy.local", port: 443, tlsMode: .tls),
+                    enableDatagrams: true
+                )
+            ),
+            notes: "Updated"
         )
 
-        try await repository.saveProfile(updatedProfile)
+        try await repository.saveProfile(updated)
         loaded = try await repository.loadProfiles()
 
         XCTAssertEqual(loaded.count, 1)
         XCTAssertEqual(loaded.first?.name, "Primary Updated")
-        XCTAssertEqual(loaded.first?.serverPort, 9443)
+        XCTAssertEqual(loaded.first?.transportType, .quic)
 
         try await repository.deleteProfile(id: profile.id)
         loaded = try await repository.loadProfiles()

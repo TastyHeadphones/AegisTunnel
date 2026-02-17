@@ -4,7 +4,6 @@ import AegisCore
 
 public enum KeychainSecretStoreError: Error, Sendable {
     case unexpectedStatus(OSStatus)
-    case invalidSecretEncoding
 }
 
 public actor KeychainSecretStore: SecretStore {
@@ -14,7 +13,7 @@ public actor KeychainSecretStore: SecretStore {
         self.service = service
     }
 
-    public func store(secret: String, for id: UUID) async throws {
+    public func store(secret: Data, for id: UUID) async throws {
         let baseQuery = query(for: id)
 
         let deleteStatus = SecItemDelete(baseQuery as CFDictionary)
@@ -23,7 +22,7 @@ public actor KeychainSecretStore: SecretStore {
         }
 
         var addQuery = baseQuery
-        addQuery[kSecValueData as String] = Data(secret.utf8)
+        addQuery[kSecValueData as String] = secret
 
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
@@ -31,7 +30,7 @@ public actor KeychainSecretStore: SecretStore {
         }
     }
 
-    public func load(id: UUID) async throws -> String? {
+    public func load(id: UUID) async throws -> Data? {
         var loadQuery = query(for: id)
         loadQuery[kSecReturnData as String] = kCFBooleanTrue
         loadQuery[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -47,14 +46,7 @@ public actor KeychainSecretStore: SecretStore {
             throw KeychainSecretStoreError.unexpectedStatus(status)
         }
 
-        guard
-            let data = result as? Data,
-            let secret = String(data: data, encoding: .utf8)
-        else {
-            throw KeychainSecretStoreError.invalidSecretEncoding
-        }
-
-        return secret
+        return result as? Data
     }
 
     public func delete(id: UUID) async throws {

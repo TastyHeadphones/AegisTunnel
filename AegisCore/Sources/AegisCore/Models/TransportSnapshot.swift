@@ -1,11 +1,14 @@
 import Foundation
 
+/// Monotonic state snapshot emitted by `TransportController`.
 public struct TransportSnapshot: Codable, Equatable, Sendable {
     public let activeProfileID: UUID?
     public let activeProfileName: String?
     public let transportType: TransportType?
     public let status: TransportStatus
     public let metrics: TransportMetrics
+    public let capabilities: TransportCapabilities
+    public let diagnostics: TransportDiagnostics
     public let updatedAt: Date
 
     public init(
@@ -14,6 +17,8 @@ public struct TransportSnapshot: Codable, Equatable, Sendable {
         transportType: TransportType?,
         status: TransportStatus,
         metrics: TransportMetrics,
+        capabilities: TransportCapabilities,
+        diagnostics: TransportDiagnostics,
         updatedAt: Date
     ) {
         self.activeProfileID = activeProfileID
@@ -21,6 +26,8 @@ public struct TransportSnapshot: Codable, Equatable, Sendable {
         self.transportType = transportType
         self.status = status
         self.metrics = metrics
+        self.capabilities = capabilities
+        self.diagnostics = diagnostics
         self.updatedAt = updatedAt
     }
 
@@ -31,6 +38,8 @@ public struct TransportSnapshot: Codable, Equatable, Sendable {
             transportType: nil,
             status: .disconnected,
             metrics: .zero,
+            capabilities: .none,
+            diagnostics: .empty,
             updatedAt: date
         )
     }

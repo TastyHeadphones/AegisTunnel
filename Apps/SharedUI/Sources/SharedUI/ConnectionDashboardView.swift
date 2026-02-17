@@ -63,6 +63,16 @@ public struct ConnectionDashboardView: View {
                         .foregroundStyle(.secondary)
                     Text(latencyLabel)
                 }
+                GridRow {
+                    Text("Duration")
+                        .foregroundStyle(.secondary)
+                    Text(durationLabel)
+                }
+                GridRow {
+                    Text("Capabilities")
+                        .foregroundStyle(.secondary)
+                    Text(capabilitySummary)
+                }
             }
         }
         .padding()
@@ -112,6 +122,28 @@ public struct ConnectionDashboardView: View {
             return "-"
         }
         return String(format: "%.1f ms", latency)
+    }
+
+    private var durationLabel: String {
+        guard let seconds = viewModel.snapshot.metrics.duration else {
+            return "-"
+        }
+
+        return String(format: "%.0f s", seconds)
+    }
+
+    private var capabilitySummary: String {
+        let capabilities = viewModel.snapshot.capabilities
+
+        let values: [String] = [
+            capabilities.supportsStreams ? "streams" : nil,
+            capabilities.supportsDatagrams ? "datagrams" : nil,
+            capabilities.supportsUDPAssociate ? "udp-associate" : nil,
+            capabilities.supportsNativeQUICStreams ? "native-quic-streams" : nil
+        ]
+        .compactMap { $0 }
+
+        return values.isEmpty ? "-" : values.joined(separator: ", ")
     }
 
     private func toggleConnection() {

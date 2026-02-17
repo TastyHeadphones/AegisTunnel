@@ -98,14 +98,86 @@ public final class AppViewModel {
     }
 
     public func beginEditProfile(_ profile: Profile) async {
-        let secret = (try? await secretStore.load(id: profile.secretID)) ?? ""
-        profileDraft = ProfileDraft(profile: profile, secret: secret)
+        var draft = ProfileDraft(profile: profile)
+
+        switch profile.transportOptions {
+        case let .masque(options):
+            if
+                let credentialID = options.proxyAuthorizationCredentialID,
+                let value = try? await secretStore.loadString(id: credentialID)
+            {
+                applyCredentialString(value, to: &draft)
+            }
+
+            if
+                let pinningCredentialID = options.pinningCredentialID,
+                let payload = try? await secretStore.load(id: pinningCredentialID),
+                let pinning = try? JSONDecoder().decode(TLSPinningPolicy.self, from: payload)
+            {
+                draft.pinnedCertificateHashesCSV = pinning.certificateSHA256Base64.joined(separator: ",")
+                draft.pinnedPublicKeyHashesCSV = pinning.publicKeySHA256Base64.joined(separator: ",")
+            }
+        case let .httpConnectTLS(options):
+            if
+                let credentialID = options.proxyAuthorizationCredentialID,
+                let value = try? await secretStore.loadString(id: credentialID)
+            {
+                applyCredentialString(value, to: &draft)
+            }
+
+            if
+                let pinningCredentialID = options.pinningCredentialID,
+                let payload = try? await secretStore.load(id: pinningCredentialID),
+                let pinning = try? JSONDecoder().decode(TLSPinningPolicy.self, from: payload)
+            {
+                draft.pinnedCertificateHashesCSV = pinning.certificateSHA256Base64.joined(separator: ",")
+                draft.pinnedPublicKeyHashesCSV = pinning.publicKeySHA256Base64.joined(separator: ",")
+            }
+        case let .socks5TLS(options):
+            if
+                let credentialID = options.usernamePasswordCredentialID,
+                let payload = try? await secretStore.load(id: credentialID),
+                let credential = try? JSONDecoder().decode(UsernamePasswordCredential.self, from: payload)
+            {
+                draft.proxyUsername = credential.username
+                draft.proxyPassword = credential.password
+            }
+
+            if
+                let pinningCredentialID = options.pinningCredentialID,
+                let payload = try? await secretStore.load(id: pinningCredentialID),
+                let pinning = try? JSONDecoder().decode(TLSPinningPolicy.self, from: payload)
+            {
+                draft.pinnedCertificateHashesCSV = pinning.certificateSHA256Base64.joined(separator: ",")
+                draft.pinnedPublicKeyHashesCSV = pinning.publicKeySHA256Base64.joined(separator: ",")
+            }
+        case let .mtlsTCP(options):
+            if
+                let pinningCredentialID = options.pinningCredentialID,
+                let payload = try? await secretStore.load(id: pinningCredentialID),
+                let pinning = try? JSONDecoder().decode(TLSPinningPolicy.self, from: payload)
+            {
+                draft.pinnedCertificateHashesCSV = pinning.certificateSHA256Base64.joined(separator: ",")
+                draft.pinnedPublicKeyHashesCSV = pinning.publicKeySHA256Base64.joined(separator: ",")
+            }
+        case let .quic(options):
+            if
+                let pinningCredentialID = options.pinningCredentialID,
+                let payload = try? await secretStore.load(id: pinningCredentialID),
+                let pinning = try? JSONDecoder().decode(TLSPinningPolicy.self, from: payload)
+            {
+                draft.pinnedCertificateHashesCSV = pinning.certificateSHA256Base64.joined(separator: ",")
+                draft.pinnedPublicKeyHashesCSV = pinning.publicKeySHA256Base64.joined(separator: ",")
+            }
+        }
+
+        profileDraft = draft
         isPresentingProfileEditor = true
     }
 
     public func saveProfileDraft() async {
         guard profileDraft.isValid else {
-            errorMessage = "Name and host are required."
+            errorMessage = "Name, endpoint, and required transport fields are needed."
             return
         }
 
@@ -113,16 +185,17 @@ public final class AppViewModel {
         defer { isBusy = false }
 
         do {
-            let resolvedSecretID = profileDraft.secretID ?? UUID()
-            let profile = profileDraft.makeProfile(secretID: resolvedSecretID)
+            let proxyAuthorizationCredentialID = try await storeProxyAuthorizationIfNeeded()
+            let socksCredentialID = try await storeSocksCredentialIfNeeded()
+            let pinningCredentialID = try await storePinningPolicyIfNeeded()
+
+            let profile = try profileDraft.makeProfile(
+                proxyAuthorizationCredentialID: proxyAuthorizationCredentialID,
+                socksUsernamePasswordCredentialID: socksCredentialID,
+                pinningCredentialIDOverride: pinningCredentialID
+            )
 
             try await profileRepository.saveProfile(profile)
-
-            if profileDraft.secret.isEmpty {
-                try await secretStore.delete(id: resolvedSecretID)
-            } else {
-                try await secretStore.store(secret: profileDraft.secret, for: resolvedSecretID)
-            }
 
             isPresentingProfileEditor = false
             profileDraft = ProfileDraft()
@@ -148,7 +221,27 @@ public final class AppViewModel {
 
             for profile in toDelete {
                 try await profileRepository.deleteProfile(id: profile.id)
-                try await secretStore.delete(id: profile.secretID)
+
+                switch profile.transportOptions {
+                case let .masque(options):
+                    try await deleteIfPresent(options.proxyAuthorizationCredentialID)
+                    try await deleteIfPresent(options.clientIdentityCredentialID)
+                    try await deleteIfPresent(options.pinningCredentialID)
+                case let .httpConnectTLS(options):
+                    try await deleteIfPresent(options.proxyAuthorizationCredentialID)
+                    try await deleteIfPresent(options.clientIdentityCredentialID)
+                    try await deleteIfPresent(options.pinningCredentialID)
+                case let .socks5TLS(options):
+                    try await deleteIfPresent(options.usernamePasswordCredentialID)
+                    try await deleteIfPresent(options.clientIdentityCredentialID)
+                    try await deleteIfPresent(options.pinningCredentialID)
+                case let .mtlsTCP(options):
+                    try await deleteIfPresent(options.clientIdentityCredentialID)
+                    try await deleteIfPresent(options.pinningCredentialID)
+                case let .quic(options):
+                    try await deleteIfPresent(options.clientIdentityCredentialID)
+                    try await deleteIfPresent(options.pinningCredentialID)
+                }
 
                 if selectedProfileID == profile.id {
                     selectedProfileID = nil
@@ -162,7 +255,11 @@ public final class AppViewModel {
     }
 
     public func connect() async {
-        await transportController.connect()
+        do {
+            try await transportController.connect()
+        } catch {
+            errorMessage = "Connection failed: \(error.localizedDescription)"
+        }
     }
 
     public func disconnect() async {
@@ -175,6 +272,73 @@ public final class AppViewModel {
             await disconnect()
         case .disconnected, .disconnecting, .failed:
             await connect()
+        }
+    }
+
+    private func storeProxyAuthorizationIfNeeded() async throws -> UUID? {
+        guard profileDraft.transportType == .httpConnectTLS || profileDraft.transportType == .masqueHTTP3 else {
+            return nil
+        }
+
+        let username = profileDraft.proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = profileDraft.proxyPassword
+
+        guard !username.isEmpty else {
+            return nil
+        }
+
+        let id = UUID()
+        try await secretStore.store(secret: "\(username):\(password)", for: id)
+        return id
+    }
+
+    private func storeSocksCredentialIfNeeded() async throws -> UUID? {
+        guard profileDraft.transportType == .socks5TLS else {
+            return nil
+        }
+
+        let username = profileDraft.proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = profileDraft.proxyPassword
+
+        guard !username.isEmpty else {
+            return nil
+        }
+
+        let payload = try JSONEncoder().encode(
+            UsernamePasswordCredential(username: username, password: password)
+        )
+
+        let id = UUID()
+        try await secretStore.store(secret: payload, for: id)
+        return id
+    }
+
+    private func storePinningPolicyIfNeeded() async throws -> UUID? {
+        guard let pinning = profileDraft.inlinePinningPolicy else {
+            return profileDraft.parsedPinningCredentialID
+        }
+
+        let payload = try JSONEncoder().encode(pinning)
+        let id = profileDraft.parsedPinningCredentialID ?? UUID()
+        try await secretStore.store(secret: payload, for: id)
+        return id
+    }
+
+    private func deleteIfPresent(_ id: UUID?) async throws {
+        guard let id else {
+            return
+        }
+
+        try await secretStore.delete(id: id)
+    }
+
+    private func applyCredentialString(_ value: String, to draft: inout ProfileDraft) {
+        if let separator = value.firstIndex(of: ":") {
+            draft.proxyUsername = String(value[..<separator])
+            draft.proxyPassword = String(value[value.index(after: separator)...])
+        } else {
+            draft.proxyUsername = value
+            draft.proxyPassword = ""
         }
     }
 }

@@ -1,41 +1,87 @@
-# AegisTunnel Monorepo Skeleton
+# AegisTunnel Monorepo
 
-This repository provides an Apple-native Swift 6 architecture skeleton for a cross-platform tunnel-style client.
+Swift 6 architecture for an Apple-native tunnel client with real transport implementations for legitimate secure connectivity to user-owned infrastructure.
 
-Important: all transport implementations are stubs only. There is no real tunneling, proxying, bypass, or circumvention logic.
+No circumvention presets or bypass tuning are included.
 
-## Module Layout
+## Repository Layout
 
 ```text
 AegisTunnel/
-  AegisCore/                               # Swift Package (logic only, no UI)
+  AegisCore/
     Package.swift
     Sources/AegisCore/
       Controllers/TransportController.swift
-      Factories/TransportFactory.swift
-      Factories/StubTransportFactory.swift
+      Errors/TransportError.swift
+      Factories/DefaultTransportFactory.swift
       Logging/Logger.swift
       Models/
+        Profile.swift
+        TransportType.swift
+        TransportOptions.swift
+        UpstreamEndpoint.swift
+        TransportStatus.swift
+        TransportMetrics.swift
+        TransportCapabilities.swift
+        TransportDiagnostics.swift
+        TransportSnapshot.swift
+        Credentials.swift
+      Networking/
+        NetworkConnectionChannel.swift
+        NetworkTLSConfigurator.swift
+        TransportRuntime.swift
+        TransportSecretDecoder.swift
+      Pipeline/
+        AsyncBackpressureQueue.swift
+        TunnelPipe.swift
       Protocols/
+        Transport.swift
+        TransportFactory.swift
+        ProfileRepository.swift
+        SecretStore.swift
       Repositories/JSONProfileRepository.swift
-      Transports/
-      Utilities/LockedBox.swift
+      Security/TLSPinningVerifier.swift
+      Transports/Real/
+        MASQUETransport.swift
+        HttpConnectTLSTransport.swift
+        Socks5TLSTransport.swift
+        MtlsTcpTunnelTransport.swift
+        QuicTunnelTransport.swift
+      Wire/
+        HTTPConnectWire.swift
+        Socks5Wire.swift
+        MuxV1.swift
+        QUICVarInt.swift
     Tests/AegisCoreTests/
+      HTTPConnectWireTests.swift
+      Socks5WireTests.swift
+      TLSPinningVerifierTests.swift
+      MuxAndBackpressureTests.swift
+      QUICVectorTests.swift
+      TransportControllerTests.swift
+      TransportIntegrationTests.swift
+      JSONProfileRepositoryTests.swift
+      MockSecretStoreTests.swift
+      Support/
+        MockSecretStore.swift
+        LoopbackServers.swift
   Apps/
-    AegisShared/                           # Shared app orchestration + adapters
+    AegisShared/
       Sources/AegisShared/
         AppBootstrap.swift
         AppViewModel.swift
+        ProfileDraft.swift
         KeychainSecretStore.swift
         OSLogLogger.swift
         LogStore.swift
-        ProfileDraft.swift
-    SharedUI/                              # Shared SwiftUI views
+        LogEntry.swift
+    SharedUI/
       Sources/SharedUI/
         AegisRootView.swift
         ProfileListView.swift
         ProfileEditorView.swift
         ConnectionDashboardView.swift
+        DiagnosticsView.swift
         LiveLogView.swift
     AegisTunnel-iOS/
       Sources/AegisTunnel_iOSApp.swift
@@ -52,90 +98,117 @@ AegisTunnel/
       AegisTunnelPacketTunnel-macOS.entitlements
 ```
 
-## Core Architecture (AegisCore)
+## Implemented Real Transports
 
-- `Transport` protocol defines `connect()`, `disconnect()`, `status`, and `metrics`.
-- `TransportController` actor owns active transport lifecycle and publishes `TransportSnapshot` via `AsyncStream`.
-- Immutable value models:
-  - `Profile`
-  - `TransportStatus`
-  - `TransportMetrics`
-  - `TransportSnapshot`
-- Persistence:
-  - `ProfileRepository` protocol
-  - `JSONProfileRepository` actor (file-based `Codable` JSON)
-- Secrets abstraction:
-  - `SecretStore` protocol
-- Logging abstraction:
-  - `Logger` protocol + `NoopLogger`
-- Stub transport implementations:
-  - `DemoTransport`
-  - `TLSTunnelTransportStub`
-  - `QUICTunnelTransportStub`
+All transport implementations conform to `Transport` and use async/await, actors, and non-blocking I/O:
 
-## App Layer
+1. `MASQUETransport`
+- QUIC connection with HTTP/3-style CONNECT-UDP bootstrap.
+- Datagram capsule forwarding with QUIC varint framing.
+- Runtime diagnostics and metrics.
 
-- SwiftUI + Observation only (`@Observable`, `@State`, bindings).
-- `AppViewModel` (`@MainActor`) coordinates repository, secrets, and `TransportController`.
-- `OSLogLogger` provides concrete logging and feeds `LogStore` for live UI logs.
-- `KeychainSecretStore` provides Apple Keychain-backed secrets.
-- Shared UI surfaces:
-  - Profile list/create/edit/delete
-  - Active profile selection
-  - Connect/disconnect controls
-  - Status + metrics dashboard
-  - Live log stream
+2. `HttpConnectTLSTransport`
+- HTTP CONNECT handshake through user-configured proxy.
+- Optional TLS/mTLS, trust evaluation, pinning support.
 
-## NetworkExtension Scaffolding
+3. `Socks5TLSTransport`
+- RFC 1928 / RFC 1929 client path (NO AUTH + USERNAME/PASSWORD).
+- CONNECT command path implemented end-to-end.
+- UDP associate capability surfaced as best-effort flag.
 
-`PacketTunnelProvider` targets for iOS and macOS are placeholders with lifecycle methods only:
+4. `MtlsTcpTunnelTransport`
+- Direct TLS/mTLS tunnel.
+- MUX v1 framing implemented (`openStream`, `closeStream`, `data`).
 
-- `startTunnel`
-- `stopTunnel`
-- `handleAppMessage`
-- `sleep`
-- `wake`
+5. `QuicTunnelTransport`
+- Direct QUIC transport via Network.framework.
+- Stream-capable with datagram capability flags.
 
-No packet processing or tunnel implementation is included.
+## Core Models and Contracts
+
+- `UpstreamEndpoint` includes host, port, `TLSMode`, SNI, pinning, ALPN.
+- `TransportOptions` is strongly typed and codable per transport.
+- `Profile` stores `transportType` + typed `transportOptions`.
+- Secret references are UUID credential IDs; secret values are retrieved through `SecretStore`.
+
+## Tunnel Pipe Bridge
+
+`TunnelPipe` provides:
+- packet read/write loops
+- cancellation-aware task lifecycle
+- bounded backpressure queue (`AsyncBackpressureQueue`)
+- metrics updates through the active transport
+
+## App Layer Updates
+
+- SwiftUI + Observation only (`@Observable`, `@State`, `@Bindable`).
+- Profile editor now supports:
+  - transport selection
+  - proxy/target fields
+  - TLS mode + SNI + ALPN
+  - pinning hashes and credential IDs
+  - proxy username/password and client identity reference
+- Dashboard now shows:
+  - status
+  - bytes/packets/duration
+  - capability flags
+- Diagnostics view shows:
+  - last handshake error
+  - certificate evaluation summary
+  - negotiated ALPN
+  - QUIC version summary
+
+## NetworkExtension Integration
+
+Both iOS and macOS packet tunnel providers now:
+- load profiles from persisted repository
+- initialize `TransportController` with `DefaultTransportFactory`
+- connect selected profile
+- apply tunnel network settings
+- bridge `NEPacketTunnelFlow` and transport with `TunnelPipe`
+- support `startTunnel`, `stopTunnel`, `handleAppMessage`, `sleep`, `wake`
+
+No hardcoded endpoint values are embedded in transport logic; selection is profile-driven.
 
 ## Build and Test
 
-### Core package
+### Core package tests
 
 ```bash
 cd /Users/young/Github/AegisTunnel/AegisCore
 swift test
 ```
 
-### Apps + extensions (Xcode wiring)
+### Optional SOCKS loopback integration tests
 
-1. Create an Xcode workspace at `/Users/young/Github/AegisTunnel`.
-2. Add `AegisCore` as a local Swift Package dependency.
-3. Create targets:
-   - iOS App target (`AegisTunnel-iOS`)
-   - macOS App target (`AegisTunnel-macOS`)
-   - iOS Packet Tunnel extension
-   - macOS Packet Tunnel extension
-   - Optional framework targets for `AegisShared` and `SharedUI` source folders
-4. Add source folders from `Apps/` and `Extensions/` to matching targets.
-5. Set deployment targets in Xcode to `iOS 26+` and `macOS 26+`.
-6. Assign the included `.entitlements` files as placeholders and replace bundle/group identifiers.
+```bash
+cd /Users/young/Github/AegisTunnel/AegisCore
+RUN_SOCKS_LOOPBACK=1 swift test --filter TransportIntegrationTests
+```
+
+### Xcode targets
+
+1. Create/open workspace at `/Users/young/Github/AegisTunnel`.
+2. Add `AegisCore` as local package dependency.
+3. Add sources under `Apps/` and `Extensions/` to corresponding targets.
+4. Set deployment targets to iOS 26+ and macOS 26+ in Xcode target settings.
+5. Configure signing, app groups, network extension capabilities, and keychain groups.
 
 ## Entitlements Placeholders
 
-Placeholder entitlement files include keys for:
-
+Placeholder entitlement files already include keys for:
 - `com.apple.developer.networking.networkextension`
 - `com.apple.security.application-groups`
 - `keychain-access-groups`
 
-Before signing/deployment, replace:
-
+Replace placeholder values before shipping:
 - `group.com.example.aegistunnel`
 - `$(AppIdentifierPrefix)com.example.aegistunnel`
-- Bundle IDs and Team IDs in target settings
+- bundle IDs / team IDs / system extension identifiers
 
-## Security / Compliance Notes
+## Security Notes
 
-- This skeleton intentionally excludes any real transport/tunnel/circumvention implementation.
-- Stub transports only simulate connection state and metrics for architecture/testability workflows.
+- Uses Apple TLS trust evaluation + optional SHA-256 pinning.
+- Uses `CryptoKit` for pin hash generation.
+- Uses only standards-based protocol flows and user-owned endpoint configuration.
+- No stealth/bypass automation logic or restricted-service presets are provided.
